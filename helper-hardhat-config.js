@@ -7,6 +7,7 @@ const networkConfig = {
         poolAddressesProvider: "0x2f39d218133AFaB8F2B819B1066c7E434Ad94E9e",
         daiEthPriceFeed: "0x773616E4d11A78F511299002da57A0a94577F1f4",
         daiToken: "0x6b175474e89094c44da98b954eedeac495271d0f",
+        uiPoolDataProviderV3: "0x91c0eA31b49B69Ea18607702c5d9aC360bf3dE7d",
     },
     11155111: {
         name: "sepolia",
