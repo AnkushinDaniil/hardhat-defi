@@ -1,4 +1,4 @@
-const { getNamedAccounts, ethers, network } = require("hardhat")
+const { ethers, network } = require("hardhat")
 const { networkConfig } = require("../helper-hardhat-config")
 
 const AMOUNT = ethers.parseEther("0.02")

@@ -1,25 +1,29 @@
-const { getNamedAccounts, network, ethers } = require("hardhat")
+/**
+ * aaveBorrow script allows to borrow and repay required amound of DAI
+ */
+const { network, ethers } = require("hardhat")
 const { getWeth, AMOUNT } = require("../scripts/getWeth")
 const { networkConfig } = require("../helper-hardhat-config")
 
 const CHAIN_ID = network.config.chainId
-let daiPrice, ethPrice, blocksToMine
+const blocksToMine = CHAIN_ID == 31337 ? 1 : 3
+let daiPrice, ethPrice, mode
 
 async function main() {
-    daiPrice = Number(await getDaiPrice())
-    ethPrice = Number(await getEthPrice())
+    daiPrice = await getDaiPrice()
+    ethPrice = await getEthPrice()
 
     // const { deployer } = await getNamedAccounts()
     const [deployer] = await ethers.getSigners()
     const pool = await getPool(deployer)
     const poolAddress = await pool.getAddress()
-    blocksToMine = CHAIN_ID == 31337 ? 1 : 3
 
     await getWeth()
 
     // Approve
     const wethTokenAddress = networkConfig[CHAIN_ID].wethToken
     await approveErc20(wethTokenAddress, poolAddress, AMOUNT, deployer)
+    console.log("-------------------------------------------------------------")
 
     // From interface: supply(address,uint256,address,uint16)
     const tx = await pool.supply(wethTokenAddress, AMOUNT, deployer, 0)
@@ -33,8 +37,11 @@ async function main() {
     )
 
     // Borrowing
-    let { totalCollateralBase, availableBorrowsBase, totalDebtBase } =
-        await getBorrowUserData(pool, deployer)
+    let availableBorrowsBase, totalDebtBase
+    ;({ availableBorrowsBase, totalDebtBase } = await getBorrowUserData(
+        pool,
+        deployer,
+    ))
 
     const amountDaiToBorrow = usdToDai(availableBorrowsBase) * 0.95
     console.log(`Available amount to borrow is ${amountDaiToBorrow} DAI`)
@@ -42,16 +49,50 @@ async function main() {
 
     const daiTokenAddress = networkConfig[CHAIN_ID].daiToken
     const isStableRateEnabled = await getReserveData(pool, daiTokenAddress)
+    mode = 2 - isStableRateEnabled
 
-    await borrowDai(
-        daiTokenAddress,
+    await borrowDai(daiTokenAddress, pool, amountDaiToBorrowWei, deployer, mode)
+    console.log("-------------------------------------------------------------")
+    ;({ availableBorrowsBase, totalDebtBase } = await getBorrowUserData(
         pool,
-        amountDaiToBorrowWei,
         deployer,
-        isStableRateEnabled,
+    ))
+    console.log("-------------------------------------------------------------")
+    await repay(
+        deployer,
+        ethers.parseEther(
+            usdToDai(totalDebtBase).toString(),
+        ) /*ethers.parseEther(amountDaiToBorrow.toString()),*/,
+        pool,
+        poolAddress,
+        daiTokenAddress,
+        mode,
     )
+    // ;({ availableBorrowsBase, totalDebtBase } =
+    //     await getBorrowUserData(pool, deployer))
 
-    await getBorrowUserData(pool, deployer)
+    // if (totalDebtBase > 0) {
+    //     await getWeth()
+    //     await swap(
+    //         wethTokenAddress,
+    //         daiTokenAddress,
+    //         totalDebtBase,
+    //         AMOUNT,
+    //         deployer,
+    //     )
+    //     console.log(
+    //         "-------------------------------------------------------------",
+    //     )
+    //     await repay(
+    //         deployer,
+    //         totalDebtBase,
+    //         pool,
+    //         poolAddress,
+    //         daiTokenAddress,
+    //         mode,
+    //     )
+    //     await getBorrowUserData(pool, deployer)
+    // }
 }
 
 /**
@@ -91,18 +132,20 @@ async function approveErc20(
     )
     const tx = await ecr20Token.approve(spenderAddress, amountToSpend)
     tx.wait(blocksToMine)
+    // console.log(
+    //     `${
+    //         account.address
+    //     } approved ${spenderAddress} to spend ${ethers.formatUnits(
+    //         amountToSpend,
+    //         "ether",
+    //     )} ETH`,
+    // )
     console.log(
-        `${
+        `allowance(${
             account.address
-        } approved ${spenderAddress} to spend ${ethers.formatUnits(
-            amountToSpend,
-            "ether",
-        )} ETH`,
-    )
-    console.log(
-        `allowance(deployer, spender) = ${ethers.formatUnits(
+        }, ${spenderAddress}) = ${ethers.formatUnits(
             await ecr20Token.allowance(account, spenderAddress),
-        )} ETH`,
+        )}`,
     )
 }
 
@@ -113,14 +156,14 @@ async function approveErc20(
  * @returns
  */
 async function getBorrowUserData(pool, account) {
-    const { totalCollateralBase, totalDebtBase, availableBorrowsBase } =
+    const { totalDebtBase, availableBorrowsBase } =
         await pool.getUserAccountData(account)
     console.log(`${account.address}`)
     console.log(`has ${usdToEth(totalCollateralBase)} worth of Eth deposited.`)
     console.log(`has ${usdToDai(totalDebtBase)} worth of DAI borrowed.`)
     console.log(`can borrow ${usdToDai(availableBorrowsBase)} worth of DAI.`)
 
-    return { totalCollateralBase, availableBorrowsBase, totalDebtBase }
+    return { availableBorrowsBase, totalDebtBase }
 }
 
 /**
@@ -157,23 +200,23 @@ async function getEthPrice() {
  * @param {contract} pool
  * @param {BigInt} amountDaiToBorrowWei
  * @param {string} account
- * @param {bool} isStableRateEnabled
+ * @param {Number} mode
  */
 async function borrowDai(
     daiAddress,
     pool,
     amountDaiToBorrowWei,
     account,
-    isStableRateEnabled,
+    mode,
 ) {
     const tx = await pool.borrow(
         daiAddress,
         amountDaiToBorrowWei,
-        2 - isStableRateEnabled,
+        mode,
         0,
         account,
     )
-    await tx.wait(1)
+    await tx.wait(blocksToMine)
     console.log(
         `${account.address} has borrowed ${ethers.formatEther(
             amountDaiToBorrowWei,
@@ -187,7 +230,7 @@ async function borrowDai(
  * @returns {Number} dai
  */
 function usdToDai(usd) {
-    const dai = Number(usd) / daiPrice
+    const dai = Number(usd) / Number(daiPrice)
     return dai
 }
 
@@ -197,7 +240,7 @@ function usdToDai(usd) {
  * @returns {Number} eth
  */
 function usdToEth(usd) {
-    const eth = Number(usd) / ethPrice
+    const eth = Number(usd) / Number(ethPrice)
     return eth
 }
 
@@ -211,18 +254,70 @@ async function getReserveData(pool, daiAddress) {
     const { configuration } = await pool.getReserveData(daiAddress)
 
     const reserveData = BigInt(configuration.toString())
-    // console.log(reserveData)
 
     // Create a bit mask to isolate the 59th bit of the configuration data
     // Bitwise shift BigInt(1) 59 places to the left
     const bitMask = BigInt(1) << BigInt(59)
-    // console.log(bitMask.toString())
 
     // Use the bitwise AND operator (&) with reserveData and bitMask to isolate the 59th bit
     // Then, shift the result 59 places to the right to get the value of the 59th bit
     const bit59Value = (reserveData & bitMask) >> BigInt(59)
 
     return Number(bit59Value)
+}
+
+// function repay(address asset, uint256 amount, uint256 rateMode, address onBehalfOf)
+async function repay(account, amount, pool, poolAddress, daiAddress, mode) {
+    await approveErc20(daiAddress, poolAddress, amount, account)
+    const tx = await pool.repay(daiAddress, amount, mode, account)
+    await tx.wait(blocksToMine)
+}
+
+/**
+ *
+ * @param {address} inputTokenAddress - address of a token, that you want to spend
+ * @param {address} outputTokenAddress - address of a token, that you want to get
+ * @param {BigInt} amountOut - amount of token, that you want to get
+ * @param {BigInt} amountInMaximum - maximum amount of token, that you want to spend
+ * @param {address} account interacts with a contract
+ */
+async function swap(
+    inputTokenAddress,
+    outputTokenAddress,
+    amountOut,
+    amountInMaximum,
+    account,
+) {
+    const swapRouter = await ethers.getContractAt(
+        "ISwapRouter",
+        networkConfig[CHAIN_ID].uniswapV3Router,
+        account,
+    )
+    const swapRouterAddress = await swapRouter.getAddress()
+
+    await approveErc20(
+        inputTokenAddress,
+        swapRouterAddress,
+        amountInMaximum,
+        account,
+    )
+    const currentTimestamp = (await ethers.provider.getBlock("latest"))
+        .timestamp
+
+    const exactOutputSingleParams = {
+        tokenIn: inputTokenAddress,
+        tokenOut: outputTokenAddress,
+        fee: networkConfig[CHAIN_ID].poolFee,
+        recipient: account,
+        deadline: currentTimestamp + 1800,
+        amountOut: amountOut,
+        amountInMaximum: amountInMaximum,
+        sqrtPriceLimitX96: 0,
+    }
+
+    const amountIn = await swapRouter.exactOutputSingle(exactOutputSingleParams)
+    // console.log(`Swap: amountIn = ${amountIn.toString()}`)
+    console.log(`Swap: amountOut = ${amountOut.toString()}`)
 }
 
 main()
